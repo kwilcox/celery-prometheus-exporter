@@ -6,21 +6,20 @@ import logging
 import prometheus_client
 import signal
 import sys
+import os
 import threading
 import time
 
-__VERSION__ = (1, 0, 0, 'final', 0)
+__VERSION__ = (2, 0, 0, 'final', 0)
 
 
 DEFAULT_BROKER = 'redis://redis:6379/0'
-DEFAULT_ADDR = '0.0.0.0:8888'
+DEFAULT_ADDR = '0.0.0.0:9000'
 
 LOG_FORMAT = '[%(asctime)s] %(name)s:%(levelname)s: %(message)s'
 
-TASKS = prometheus_client.Gauge(
-    'celery_tasks', 'Number of tasks per state', ['state'])
-WORKERS = prometheus_client.Gauge(
-    'celery_workers', 'Number of alive workers')
+TASKS = prometheus_client.Counter('celery_tasks', 'Number of tasks per state', ['state', "worker", "task_name", "routing_key"])
+WORKERS = prometheus_client.Gauge('celery_workers', 'Number of alive workers')
 
 
 class MonitorThread(threading.Thread):
@@ -35,25 +34,30 @@ class MonitorThread(threading.Thread):
         super().__init__(*args, **kwargs)
 
     def run(self):
-        self._state = self._app.events.State()
-        self._known_states = set()
+        self._state = self._app.events.State(
+            max_workers_in_memory=42,
+            max_tasks_in_memory=10000
+        )
         self._monitor()
 
-    def _process_event(self, evt):
+    def _process_event(self, event):
         # Events might come in in parallel. Celery already has a lock that deals
         # with this exact situation so we'll use that for now.
         with self._state._mutex:
-            self._state._event(evt)
-            cnt = collections.Counter(
-                t.state for _, t in self._state.tasks.items())
-            self._known_states.update(cnt.elements())
-            seen_states = set()
-            for state_name, count in cnt.items():
-                TASKS.labels(state_name).set(count)
-                seen_states.add(state_name)
-            for state_name in self._known_states - seen_states:
-                TASKS.labels(state_name).set(0)
-            WORKERS.set(len([w for w in self._state.workers.values() if w.alive]))
+            self._state._event(event)
+            if event['type'].find("task") is not -1:
+                task = self._state.tasks.get(event['uuid'])
+#                self.log.info((task.state, task.uuid, task.args))
+                TASKS.labels(
+                    state=task.state,
+                    worker=task.worker.hostname,
+                    task_name=task.name,
+                    routing_key=task.routing_key
+                ).inc(1)
+            elif event['type'].find("worker") is not -1:
+                WORKERS.set(len([w for w in self._state.workers.values() if w.alive]))
+            else:
+                self.log.info("Unknown event type: " + event['type'])
 
     def _monitor(self):
         while True:
@@ -75,8 +79,6 @@ def setup_metrics():
     This initializes the available metrics with default values so that
     even before the first event is received, data can be exposed.
     """
-    for state in celery.states.ALL_STATES:
-        TASKS.labels(state).set(0)
     WORKERS.set(0)
 
 
