@@ -22,6 +22,14 @@ LOG_FORMAT = '[%(asctime)s] %(name)s:%(levelname)s: %(message)s'
 TASKS = prometheus_client.Counter('celery_tasks', 'Number of tasks per state', ['state', "worker", "task_name", "routing_key"])
 WORKERS = prometheus_client.Gauge('celery_workers', 'Number of alive workers')
 
+UPTIME = None
+
+def check_worker_general_failure(worker_pool_size):
+    if worker_pool_size is 0:
+        global UPTIME
+        if UPTIME is None:
+            UPTIME = prometheus_client.Gauge('celery_last_failure_time', 'Timestamp of the last failure, to compute uptime')
+        UPTIME.set(int(round(time.time() * 1000)))
 
 class MonitorThread(threading.Thread):
     """
@@ -56,7 +64,9 @@ class MonitorThread(threading.Thread):
                     routing_key=task.routing_key
                 ).inc(1)
             elif event['type'].find("worker") is not -1:
-                WORKERS.set(len([w for w in self._state.workers.values() if w.alive]))
+                worker_pool_size = len([w for w in self._state.workers.values() if w.alive])
+                WORKERS.set(worker_pool_size)
+                check_worker_general_failure(worker_pool_size)
             else:
                 self.log.info("Unknown event type: " + event['type'])
 
@@ -71,16 +81,7 @@ class MonitorThread(threading.Thread):
                     self.log.info("Connected to broker")
             except Exception as e:
                 self.log.error("Queue connection failed", e)
-                setup_metrics()
                 time.sleep(5)
-
-
-def setup_metrics():
-    """
-    This initializes the available metrics with default values so that
-    even before the first event is received, data can be exposed.
-    """
-    WORKERS.set(0)
 
 
 # override the prometheus_client handler to ping workers
@@ -98,6 +99,7 @@ class CustomMetricsHandler(prometheus_client.MetricsHandler):
         if random.randint(0, 10) is 0:
             workers = self._app.control.ping(timeout=1)
             WORKERS.set(len(workers))
+            check_worker_general_failure(len(workers))
 
 def start_httpd(addr):
     """
@@ -154,7 +156,6 @@ def main():
 
     global DEFAULT_BROKER
     DEFAULT_BROKER = opts.broker
-    setup_metrics()
     t = MonitorThread(app=celery.Celery(broker=opts.broker))
     t.daemon = True
     t.start()
