@@ -11,4 +11,4 @@ ENTRYPOINT ["python", "/celery_prometheus_exporter.py"]
 
 COPY celery_prometheus_exporter.py /celery_prometheus_exporter.py
 
-RUN pip install celery==3.1.25 redis prometheus_client
+RUN pip install celery==3.1.25 redis prometheus_client==0.0.18
