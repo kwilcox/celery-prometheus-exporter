@@ -22,6 +22,7 @@ Unfortunately, it requested major changes, that would break any previous metric 
 * HTTP server listen on port 9000 by default (generic port for prometheus exporters).
 * The cache size of the ``_state`` attribute in ``MonitorThread`` was limited to 10.000. This may be increased with ``self._app.events.State(max_tasks_in_memory=xxxxx)``. But it's actually not the point, since it was also limiting the metric to 10.000.
 * ``celery_tasks`` metrics is no longer a gauge: counter are more convienent for metrics keep increasing to inf+
+* ``_process_event`` is not called if producers, workers and celerybeat die altogether, in fact no event is triggered. So we need to send some ping to set worker pool size (1 ping every 10 scrapes).
 
 How to use
 ==========

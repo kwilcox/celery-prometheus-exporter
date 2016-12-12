@@ -9,6 +9,7 @@ import sys
 import os
 import threading
 import time
+import random
 
 __VERSION__ = (2, 0, 0, 'final', 0)
 
@@ -82,6 +83,22 @@ def setup_metrics():
     WORKERS.set(0)
 
 
+# override the prometheus_client handler to ping workers
+# this is needed because if every producers, workers and celerybeat die, _process_event could never be called
+class CustomMetricsHandler(prometheus_client.MetricsHandler):
+    def __init__(self, *args, **kwargs):
+        self._app = celery.Celery(broker=DEFAULT_BROKER)
+        super(CustomMetricsHandler, self).__init__(*args, **kwargs)
+
+    def do_GET(self):
+        super(CustomMetricsHandler, self).do_GET()
+        # pinging workers can take some time
+        # so we won't do it at each scrape
+        # we ping workers after metric collection because prometheus store the timestamp of the request beginning
+        if random.randint(0, 10) is 0:
+            workers = self._app.control.ping(timeout=1)
+            WORKERS.set(len(workers))
+
 def start_httpd(addr):
     """
     Starts the exposing HTTPD using the addr provided in a seperate
@@ -89,7 +106,16 @@ def start_httpd(addr):
     """
     host, port = addr.split(':')
     logging.info('Starting HTTPD on {}:{}'.format(host, port))
-    prometheus_client.start_http_server(int(port), host)
+
+    class PrometheusMetricsServer(threading.Thread):
+        def run(self):
+            from http.server import HTTPServer
+            httpd = HTTPServer((host, int(port)), CustomMetricsHandler)
+            httpd.serve_forever()
+    t = PrometheusMetricsServer()
+    t.daemon = True
+    t.start()
+#    prometheus_client.start_http_server(int(port), host)
 
 
 def shutdown(signum, frame):
@@ -126,6 +152,8 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
+    global DEFAULT_BROKER
+    DEFAULT_BROKER = opts.broker
     setup_metrics()
     t = MonitorThread(app=celery.Celery(broker=opts.broker))
     t.daemon = True
